@@ -3,7 +3,7 @@
   const DB_VERSION = 1;
   const STORE_NAME = "app";
   const STATE_KEY = "state";
-  const SCHEMA_VERSION = 1;
+  const SCHEMA_VERSION = 2;
   let dbPromise;
 
   function openDb() {

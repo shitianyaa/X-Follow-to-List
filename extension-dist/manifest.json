@@ -34,7 +34,7 @@
     },
     {
       "matches": ["https://x.com/*", "https://twitter.com/*"],
-      "js": ["src/job-state.js", "src/data-store.js", "src/content.js"],
+      "js": ["src/job-state.js", "src/data-store.js", "src/account-state.js", "src/account-import.js", "src/content.js"],
       "run_at": "document_idle"
     }
   ]

@@ -2,8 +2,8 @@
   const SOURCE = "x-list-curator";
   const STORAGE_KEY = "x-list-curator-state-v1";
   const EXTENSION_VERSION = chrome.runtime.getManifest().version;
-  const MAX_USERS = 5000;
-  const ROW_HEIGHT = 88;
+  const SOURCE_LABELS = { custom: "自定义名单", following: "关注列表", legacy: "历史缓存" };
+  const ROW_HEIGHT = 104;
   const VISIBLE_ROWS = 14;
   const DEFAULT_SETTINGS = {
     betweenMin: 2,
@@ -28,8 +28,10 @@
   };
 
   const state = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     users: [],
+    collections: { custom: [], following: [], legacy: [] },
+    activeSource: "custom",
     selectedIds: [],
     filters: { ...DEFAULT_FILTERS },
     filterDraft: { ...DEFAULT_FILTERS },
@@ -37,7 +39,8 @@
     settings: { ...DEFAULT_SETTINGS },
     job: null,
     history: [],
-    sessionFingerprint: ""
+    sessionFingerprint: "",
+    lookupCooldownUntil: 0
   };
   const runtime = {
     panelOpen: false,
@@ -54,16 +57,17 @@
     pendingAdds: new Map(),
     storageCorrupt: false,
     captureGeneration: 0,
-    captureClearPending: false
+    captureClearPending: false,
+    accountImport: null
   };
   const refs = {};
 
   const css = `
     :host { all: initial; }
     * { box-sizing: border-box; }
-    .xcurator-panel { position: fixed; z-index: 2147483647; top: 16px; right: 16px; width: min(470px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: hidden; color: #eff6f0; background: #101817; border: 1px solid #2d4941; border-radius: 18px; box-shadow: 0 22px 70px rgba(0,0,0,.46); font: 13px/1.4 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .xcurator-panel { display: flex; flex-direction: column; position: fixed; z-index: 2147483647; top: 16px; right: 16px; width: min(470px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: hidden; color: #eff6f0; background: #101817; border: 1px solid #2d4941; border-radius: 18px; box-shadow: 0 22px 70px rgba(0,0,0,.46); font: 13px/1.4 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .xcurator-panel[hidden] { display: none; }
-    .xcurator-header { display: flex; align-items: flex-start; justify-content: space-between; padding: 18px 20px 14px; border-bottom: 1px solid #203730; background: linear-gradient(135deg, #14231f, #101817 68%); }
+    .xcurator-header { flex: 0 0 auto; display: flex; align-items: flex-start; justify-content: space-between; padding: 18px 20px 14px; border-bottom: 1px solid #203730; background: linear-gradient(135deg, #14231f, #101817 68%); }
     .header-actions { display: flex; align-items: center; gap: 8px; margin-left: 12px; flex: 0 0 auto; }
     .clear-capture { min-height: 30px; padding: 5px 9px; border: 1px solid #705541; border-radius: 8px; color: #f0c88d; background: rgba(122, 75, 38, .14); font-size: 11px; font-weight: 700; white-space: nowrap; }
     .clear-capture:hover:not(:disabled) { color: #fff1d3; border-color: #c08b57; background: rgba(151, 91, 45, .28); }
@@ -71,7 +75,7 @@
     h1 { margin: 3px 0 0; color: #f5f1dc; font: 600 23px/1.1 Georgia, Cambria, serif; letter-spacing: -.02em; }
     .close { width: 30px; height: 30px; border: 0; border-radius: 50%; color: #b7cbc0; background: #1c302a; cursor: pointer; font-size: 18px; }
     .close:hover { color: #fff; background: #315246; }
-    .xcurator-body { display: flex; flex-direction: column; max-height: calc(100vh - 101px); overflow: auto; }
+    .xcurator-body { min-height: 0; flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; }
     .section { padding: 14px 20px; border-bottom: 1px solid #203730; }
     .section-title { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 9px; color: #f4f0dd; font-weight: 700; }
     .muted { color: #8ea99c; }
@@ -116,8 +120,8 @@
     button.primary { width: 100%; margin-top: 10px; border-color: #a3e9ad; color: #092216; background: #9ae5a6; font-size: 13px; }
     button.primary:hover { background: #b1f1b7; }
     button.danger { color: #efb3a4; }
-    .list-viewport { height: 342px; overflow: auto; border: 1px solid #29463d; border-radius: 10px; background: #0c1413; }
-    .list-row { display: grid; grid-template-columns: 21px 44px minmax(0, 1fr); gap: 9px; align-items: center; min-height: ${ROW_HEIGHT}px; padding: 8px 10px; border-bottom: 1px solid #1a2a26; }
+    .list-viewport { height: min(300px, 38vh); overflow: auto; overscroll-behavior: contain; border: 1px solid #29463d; border-radius: 10px; background: #0c1413; }
+    .list-row { display: grid; grid-template-columns: 21px 44px minmax(0, 1fr); gap: 9px; align-items: center; height: ${ROW_HEIGHT}px; overflow: hidden; padding: 8px 10px; border-bottom: 1px solid #1a2a26; }
     .list-row:last-child { border-bottom: 0; }
     .list-row:hover { background: #12231d; }
     .row-check { accent-color: #98e6aa; }
@@ -128,7 +132,7 @@
     .badge { color: #92e6a5; font-size: 11px; }
     .handle { color: #87a99a; font-size: 11px; }
     .bio { display: -webkit-box; overflow: hidden; margin-top: 2px; color: #b1c5b9; font-size: 11px; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-    .metrics { margin-top: 3px; color: #789588; font-size: 10px; }
+    .metrics { margin-top: 3px; color: #789588; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .empty { display: grid; place-items: center; height: 100%; padding: 20px; color: #819a8e; text-align: center; }
     .selection-hint { margin-top: 7px; color: #86a294; font-size: 10px; }
     details { margin-top: 10px; border: 1px solid #28453b; border-radius: 9px; }
@@ -151,8 +155,38 @@
     .history-item strong { color: #e9f0e8; }
     .history-item .history-meta { margin-top: 3px; color: #87a294; font-size: 10px; }
     .history-item .history-actions { display: flex; gap: 6px; margin-top: 6px; }
-    .toast { position: fixed; right: 18px; bottom: 18px; max-width: 360px; padding: 10px 12px; color: #07170e; background: #a3e9ad; border-radius: 9px; box-shadow: 0 10px 30px rgba(0,0,0,.3); font-weight: 700; }
-    @media (max-width: 560px) { .xcurator-panel { top: 8px; right: 8px; width: calc(100vw - 16px); max-height: calc(100vh - 16px); } .xcurator-body { max-height: calc(100vh - 87px); } .job-action-groups { grid-template-columns: 1fr; } .job-action-group.export .job-action-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .metric-range { grid-template-columns: 1fr; gap: 5px; } .metric-name { padding-bottom: 0; } .relationship-filter small { display: none; } }
+    .toast { flex: 0 0 auto; margin: 0 12px 12px; padding: 8px 10px; color: #07170e; background: #a3e9ad; border-radius: 9px; font-size: 11px; font-weight: 700; }
+    @media (max-width: 560px) { .xcurator-panel { top: 8px; right: 8px; width: calc(100vw - 16px); max-height: calc(100vh - 16px); }  .job-action-groups { grid-template-columns: 1fr; } .job-action-group.export .job-action-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .metric-range { grid-template-columns: 1fr; gap: 5px; } .metric-name { padding-bottom: 0; } .relationship-filter small { display: none; } }
+
+    [hidden] { display: none !important; }
+    .import-footer { flex: 0 0 auto; padding: 12px 20px 14px; border-top: 1px solid #355448; background: #14231f; }
+    .import-footer .section-title { font-size: 12px; margin-bottom: 7px; }
+    .import-footer .section-title .muted { font-size: 10px; font-weight: 400; }
+    .import-footer .check { display: block; margin-top: 7px; color: #a9c1b2; font-size: 10px; }
+    .footer-actions { display: flex; gap: 8px; margin-top: 8px; }
+    .footer-actions .primary { flex: 1; width: auto; margin-top: 0; }
+    .footer-actions button { min-height: 36px; }
+    .source-panel { margin-top: 9px; overflow: hidden; }
+    .source-panel > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 43px; font-size: 12px; }
+    .source-panel > summary::before { content: "▸"; color: #9ae5a6; }
+    .source-panel[open] > summary::before { content: "▾"; }
+    .source-panel > summary strong { flex: 1; color: #f4f0dd; }
+    .source-panel > summary span { color: #8ea99c; font-size: 10px; }
+    .source-panel[open] > summary { border-bottom: 1px solid #28453b; background: #15241f; }
+    .source-content { padding: 10px; }
+    .filters-content { padding: 2px 9px 10px; }
+    .source-clean { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+    .source-clean button { flex: 0 0 auto; font-size: 10px; }
+    .source-clean .selection-hint { margin: 0; }
+    .selection-panel { margin-top: 9px; margin-bottom: 8px; }
+    .selection-scope { white-space: normal; text-align: right; }
+    .snapshot-action { margin-top: 8px; }
+    .job-card { margin-top: 9px; }
+    .notice > summary { padding: 0; color: #e9c68b; }
+    .notice > div { margin-top: 7px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    button:focus-visible, summary:focus-visible, input:focus-visible { outline: 2px solid #9ae5a6; outline-offset: 2px; }
+    @media (max-width: 420px) { .xcurator-header { padding: 12px; } h1 { font-size: 19px; } .header-actions { gap: 5px; margin-left: 6px; } .section { padding: 10px 12px; } .import-footer { padding: 10px 12px; } .source-content { padding: 8px; } }
   `;
 
   function escapeHtml(value) {
@@ -165,27 +199,6 @@
 
   function splitTerms(value) {
     return String(value || "").split(/[\s,，、]+/).map((term) => term.trim().toLowerCase()).filter(Boolean);
-  }
-
-  function normalizeUser(raw) {
-    const id = String(raw?.id || raw?.rest_id || raw?.id_str || "").trim();
-    const handle = String(raw?.handle || raw?.screen_name || "").replace(/^@/, "").trim();
-    if (!id || !handle) return null;
-    return {
-      id,
-      handle,
-      name: String(raw?.name || handle).trim(),
-      bio: String(raw?.bio || "").trim(),
-      location: String(raw?.location || "").trim(),
-      avatar: String(raw?.avatar || "").trim(),
-      followers: Number(raw?.followers || 0) || 0,
-      following: Number(raw?.following || 0) || 0,
-      posts: Number(raw?.posts || 0) || 0,
-      verified: Boolean(raw?.verified),
-      protected: Boolean(raw?.protected),
-      mutual: Boolean(raw?.mutual),
-      capturedAt: Number(raw?.capturedAt || Date.now())
-    };
   }
 
   function parseListUrl(value) {
@@ -239,6 +252,10 @@
     return Number(value || 0).toLocaleString("zh-CN");
   }
 
+  function formatMetric(value) {
+    return value == null ? "未知" : formatNumber(value);
+  }
+
   function formatDuration(ms) {
     const seconds = Math.max(0, Math.ceil(ms / 1000));
     if (seconds < 60) return `${seconds} 秒`;
@@ -261,6 +278,7 @@
   }
 
   async function persistNow() {
+    if (runtime.storageCorrupt) return;
     recomputeJobStats(state.job);
     state.job && (state.job.updatedAt = Date.now());
     try {
@@ -291,16 +309,23 @@
       <style>${css}</style>
       <section class="xcurator-panel" hidden aria-label="X Following Curator">
         <header class="xcurator-header">
-          <div><div class="eyebrow">X FOLLOW TO LIST · ${escapeHtml(EXTENSION_VERSION)}</div><h1>把关注列表变成你的清单</h1></div>
-          <div class="header-actions"><button class="clear-capture" data-ref="clearCaptured" data-action="clearCaptured" title="清除本地已捕获账号和勾选状态，不影响导入任务">清除已捕获</button><button class="close" data-action="close" title="关闭">×</button></div>
+          <div><div class="eyebrow">X FOLLOW TO LIST · ${escapeHtml(EXTENSION_VERSION)}</div><h1>把账号名单变成你的清单</h1></div>
+          <div class="header-actions"><button class="clear-capture" data-ref="clearCaptured" data-action="clearCaptured" title="清除所有来源的账号缓存和名单，保留任务及冷却">清除缓存</button><button class="close" data-action="close" title="关闭">×</button></div>
         </header>
         <div class="xcurator-body">
-          <section class="section">
+          <section class="section session-section">
             <div class="status-line"><span class="dot" data-ref="sessionDot"></span><span data-ref="pageStatus">正在等待 X 页面数据…</span></div>
-            <div class="notice">此扩展使用当前 X 网页会话发起列表操作。X 可能限制或暂停自动化行为；请仅添加你明确选择的账号，并自行承担账号与平台规则风险。</div>
+            <details class="notice"><summary>操作说明与风险</summary><div>此扩展使用当前 X 网页会话发起列表操作。X 可能限制或暂停自动化行为；请仅添加你明确选择的账号。</div></details>
           </section>
-          <section class="section">
-            <div class="section-title"><span>筛选条件</span><span class="muted" data-ref="captureCount">已捕获 0 人</span></div>
+          <section class="section source-section">
+            <div class="section-title"><span>账号来源</span><span class="muted" data-ref="captureCount" title="两种名单共用账号资料；清空名单不会删除缓存">共用缓存 0 人</span></div>
+            <details class="source-panel" data-source="custom" open>
+              <summary><strong>自定义名单</strong><span data-source-count="custom">0 人</span></summary>
+              <div class="source-content">
+                <div data-ref="accountImport"></div>
+                <div data-results-slot="custom">
+                  <div data-ref="accountResults">
+                    <details class="filters-panel"><summary>筛选本组账号（可选）</summary><div class="filters-content">
             <div class="filter-grid">
               <label class="field"><span>搜索姓名、@用户名、简介或位置</span><input type="text" data-ref="query" placeholder="例如：design / 设计 / @alice"></label>
               <div class="grid2"><label class="field"><span>包含关键词</span><input type="text" data-ref="include" placeholder="空格分隔"></label><label class="field"><span>排除关键词</span><input type="text" data-ref="exclude" placeholder="空格分隔"></label></div>
@@ -313,23 +338,35 @@
             </div>
             <div style="margin-top:9px"><label class="relationship-filter"><input type="checkbox" data-ref="mutual"><span class="relationship-mark">↔</span><span>仅互关</span><small>对方也关注你</small></label></div>
             <div class="filter-apply-row"><button class="filter-reset" data-action="clearFilters">清除条件</button><div class="filter-commit"><span class="match-count" data-ref="matchCount">已匹配 0 人</span><button class="filter-apply" data-action="applyFilters">确定筛选</button></div></div>
+
+                      <div class="selection-hint">统计缺失显示“未知”；设置数值条件时，缺失该项统计的账号不参与匹配。</div>
+                    </div></details>
             <div class="selection-panel">
-              <div class="selection-panel-head"><div><span class="panel-kicker">选择结果</span><strong data-ref="selectionCount">已选 0 人</strong></div><span class="selection-scope" data-ref="selectionScope">当前结果 0 人</span></div>
-              <div class="selection-actions"><button data-ref="selectFiltered" data-action="selectFiltered">全选当前结果</button><button data-action="invertSelection">反选当前结果</button><button data-ref="clearSelection" data-action="clearSelection">清空已选</button><button class="selection-export" data-action="exportCsv">导出已选 CSV</button></div>
+              <div class="selection-panel-head"><div><span class="panel-kicker" data-ref="resultsTitle">本组结果</span><strong data-ref="selectionCount">已选 0 人</strong></div><span class="selection-scope" data-ref="selectionScope">当前结果 0 人</span></div>
+              <div class="selection-actions"><button data-ref="selectFiltered" data-action="selectFiltered">全选当前结果</button><button data-action="invertSelection">反选当前结果</button><button data-ref="clearSelection" data-action="clearSelection">清空本组勾选</button><button class="selection-export" data-action="exportCsv">导出已选 CSV</button></div>
             </div>
-            <div class="list-viewport" data-ref="listViewport"><div class="empty">打开自己的 Following 页面并滚动，扩展会在本地收集可见用户。</div></div>
-            <div class="selection-hint">继续滚动 Following 页面可以捕获更多账号；数据只保存在本地。</div>
+            <div class="list-viewport" data-ref="listViewport"><div class="empty">粘贴自定义名单并解析，或滚动 Following 页面收集账号。</div></div>
+
+                    <div class="source-clean"><span class="selection-hint">清空本组名单仍会保留共用缓存</span><button data-ref="clearSource" data-action="clearSource">清空自定义名单</button></div>
+                  </div>
+                </div>
+              </div>
+            </details>
+            <details class="source-panel" data-source="following">
+              <summary><strong>关注列表</strong><span data-source-count="following">0 人</span></summary>
+              <div class="source-content"><p class="selection-hint">滚动自己的 Following 页面收集账号；这些资料也能供自定义名单直接复用。</p><div data-results-slot="following"></div></div>
+            </details>
+            <details class="source-panel" data-source="legacy" hidden>
+              <summary><strong>历史缓存</strong><span data-source-count="legacy">0 人</span></summary>
+              <div class="source-content"><p class="selection-hint">旧版账号未记录来源，先保留在这里。重新捕获或导入后会归入对应名单；旧缓存中不确定的零值显示为“未知”。</p><div data-results-slot="legacy"></div></div>
+            </details>
           </section>
-          <section class="section">
-            <div class="section-title"><span>导入到列表</span><span><button data-action="importSnapshot">导入快照</button></span></div>
-            <label class="field"><span>列表分享链接</span><input type="text" data-ref="listUrl" placeholder="https://x.com/i/lists/1234567890"></label>
+          <section class="section task-section">
             <details><summary>节奏与恢复设置</summary><div class="advanced">
               <div class="grid2"><label class="field"><span>两次操作间隔（秒）</span><div class="grid2"><input type="number" min="1" max="60" step="0.1" data-ref="betweenMin"><input type="number" min="1" max="120" step="0.1" data-ref="betweenMax"></div></label><label class="field"><span>每批账号数</span><input type="number" min="1" max="500" data-ref="batchSize"></label></div>
               <div class="grid3"><label class="field"><span>批次暂停最短（分钟）</span><input type="number" min="0.1" max="60" step="0.1" data-ref="pauseMin"></label><label class="field"><span>批次暂停最长（分钟）</span><input type="number" min="0.1" max="120" step="0.1" data-ref="pauseMax"></label><label class="field"><span>单项最多重试</span><input type="number" min="1" max="5" data-ref="maxAttempts"></label></div>
             </div></details>
-            <label class="check" style="margin-top:10px"><input type="checkbox" data-ref="ackRisk"> 我已确认这是对当前 X 会话的批量列表操作 <span class="risk-inline">（可能触发 X 限流或账号限制）</span></label>
-            <div class="selection-hint" data-ref="confirmSummary">目标列表：未设置 · 待导入：0 人</div>
-            <button class="primary" data-ref="start" data-action="start">导入到列表</button>
+            <div class="snapshot-action"><button data-action="importSnapshot">恢复任务快照</button></div>
             <div class="job-card" data-ref="jobCard" hidden>
               <div class="job-head"><span data-ref="jobStatus">无任务</span><span data-ref="jobProgressText">0 / 0</span></div>
               <div class="progress-track"><div class="progress-fill" data-ref="progressFill"></div></div>
@@ -345,23 +382,63 @@
                 </div>
               </div>
             </div>
+
           </section>
           <section class="section" data-ref="historySection" hidden>
             <div class="section-title"><span>历史任务</span><span><button data-action="importSnapshot">导入快照</button> <span class="muted" data-ref="historyCount">0 个</span></span></div>
             <div class="history-list" data-ref="historyList"></div>
             <input type="file" data-ref="snapshotInput" accept="application/json,.json" hidden>
           </section>
+
         </div>
+        <footer class="import-footer">
+          <div class="section-title"><span>添加到 X 列表</span><span class="muted" data-ref="footerProgress">预览并勾选后添加</span></div>
+          <label class="field"><span class="sr-only">列表分享链接</span><input type="text" data-ref="listUrl" placeholder="https://x.com/i/lists/1234567890"></label>
+          <label class="check"><input type="checkbox" data-ref="ackRisk"> 我已确认当前会话与所选账号 <span class="risk-inline">（可能触发限流）</span></label>
+          <div class="selection-hint" data-ref="confirmSummary">目标列表：未设置 · 待导入：0 人</div>
+          <div class="footer-actions"><button class="primary" data-ref="start" data-action="start">导入已选 0 人</button><button class="danger" data-ref="footerPause" data-action="pause" hidden>暂停</button></div>
+        </footer>
         <div class="toast" data-ref="toast" hidden></div>
       </section>`;
     document.documentElement.appendChild(host);
     refs.host = host;
     refs.panel = shadow.querySelector(".xcurator-panel");
     shadow.querySelectorAll("[data-ref]").forEach((node) => { refs[node.dataset.ref] = node; });
+    runtime.accountImport = globalThis.XListImport.mount({
+      root: refs.accountImport,
+      getUsers: () => state.users,
+      beginImport: (handles) => {
+        const known = new Map(state.users.map((user) => [user.handle.toLowerCase(), user.id]));
+        globalThis.XListAccounts.replaceSource(state, "custom", handles.map((handle) => known.get(handle.toLowerCase())).filter(Boolean));
+        state.filters = { ...DEFAULT_FILTERS };
+        state.filterDraft = { ...DEFAULT_FILTERS };
+        activateSource("custom");
+      },
+      onStateChange: () => {
+        render();
+        if (!runtime.accountImport.running && state.activeSource === "custom" && state.collections.custom.length) {
+          const body = refs.panel.querySelector(".xcurator-body");
+          body.scrollTop += refs.accountResults.getBoundingClientRect().top - body.getBoundingClientRect().top;
+        }
+      },
+      canImport: () => !runtime.storageCorrupt && !runtime.running && !["running", "cooldown"].includes(state.job?.status),
+      getSettings: currentSettings,
+      getCooldown: () => state.lookupCooldownUntil,
+      onRateLimit: (result) => {
+        state.lookupCooldownUntil = Date.now() + Math.max(cooldownFor(result.status), Number(result.retryAfterMs) || 0);
+        return persistNow();
+      },
+      mergeUsers: (users) => mergeUsers(users, "custom"),
+      showToast
+    });
     shadow.addEventListener("click", onClick);
     shadow.addEventListener("input", onInput);
     shadow.addEventListener("change", onChange);
     refs.listViewport.addEventListener("scroll", renderList);
+    shadow.addEventListener("toggle", (event) => {
+      const source = event.target.dataset?.source;
+      if (source && event.target.open && source !== state.activeSource) activateSource(source);
+    }, true);
   }
 
   function onInput(event) {
@@ -395,7 +472,7 @@
     if (action) {
       event.preventDefault();
       const historyId = event.target?.dataset?.historyId || event.target?.closest?.("[data-history-id]")?.dataset?.historyId;
-      const handlers = { close: closePanel, applyFilters, clearFilters, clearCaptured: clearCapturedUsers, selectFiltered, invertSelection, clearSelection, exportCsv, exportJob, exportSnapshot, importSnapshot, start: startOrResume, resume: resumeJob, pause: pauseJob, stopJob, archiveJob };
+      const handlers = { close: closePanel, applyFilters, clearFilters, clearCaptured: clearCapturedUsers, clearSource: clearCurrentSource, selectFiltered, invertSelection, clearSelection, exportCsv, exportJob, exportSnapshot, importSnapshot, start: startOrResume, resume: resumeJob, pause: pauseJob, stopJob, archiveJob };
       if (action === "retryHistory") return retryHistory(historyId);
       if (action === "deleteHistory") return deleteHistory(historyId);
       if (action === "exportHistory") return exportHistory(historyId);
@@ -410,6 +487,8 @@
       state.selectedIds = Array.from(set);
       persistSoon();
       renderSelection();
+      renderJob();
+      renderConfirmation();
     }
   }
 
@@ -429,25 +508,14 @@
     const query = String(f.query || "").trim().toLowerCase();
     const includes = splitTerms(f.include);
     const excludes = splitTerms(f.exclude);
-    const minFollowers = f.minFollowers === "" ? null : Number(f.minFollowers);
-    const maxFollowers = f.maxFollowers === "" ? null : Number(f.maxFollowers);
     const location = String(f.location || "").trim().toLowerCase();
-    const minFollowing = f.minFollowing === "" ? null : Number(f.minFollowing);
-    const maxFollowing = f.maxFollowing === "" ? null : Number(f.maxFollowing);
-    const minPosts = f.minPosts === "" ? null : Number(f.minPosts);
-    const maxPosts = f.maxPosts === "" ? null : Number(f.maxPosts);
-    return state.users.filter((user) => {
+    return globalThis.XListAccounts.sourceUsers(state).filter((user) => {
       const haystack = `${user.name} @${user.handle} ${user.bio} ${user.location}`.toLowerCase();
       if (query && !haystack.includes(query.replace(/^@/, ""))) return false;
       if (includes.length && !includes.every((term) => haystack.includes(term))) return false;
       if (excludes.some((term) => haystack.includes(term))) return false;
-      if (minFollowers != null && user.followers < minFollowers) return false;
-      if (maxFollowers != null && user.followers > maxFollowers) return false;
       if (location && !String(user.location || "").toLowerCase().includes(location)) return false;
-      if (minFollowing != null && user.following < minFollowing) return false;
-      if (maxFollowing != null && user.following > maxFollowing) return false;
-      if (minPosts != null && user.posts < minPosts) return false;
-      if (maxPosts != null && user.posts > maxPosts) return false;
+      if (!globalThis.XListAccounts.matchesRanges(user, f)) return false;
       if (f.mutual && !user.mutual) return false;
       return true;
     });
@@ -496,7 +564,7 @@
     runtime.filteredUsers = filteredUsers();
     const users = runtime.filteredUsers;
     if (!users.length) {
-      refs.listViewport.innerHTML = `<div class="empty">${state.users.length ? "没有符合当前筛选条件的用户。" : "打开自己的 Following 页面并滚动，扩展会在本地收集可见用户。"}</div>`;
+      refs.listViewport.innerHTML = `<div class="empty">${state.collections[state.activeSource].length ? "本组没有符合当前筛选条件的账号。" : state.activeSource === "custom" ? "粘贴名单并解析，结果会直接显示在这里。" : state.activeSource === "following" ? "打开自己的 Following 页面并滚动，即可在这里查看捕获的账号。" : "历史账号已归入对应来源。"}</div>`;
       return;
     }
     const scrollTop = refs.listViewport.scrollTop;
@@ -505,7 +573,7 @@
     const checked = selectedSet();
     const rows = users.slice(start, end).map((user) => {
       const avatar = user.avatar ? `<img class="avatar" loading="lazy" referrerpolicy="no-referrer" src="${escapeHtml(user.avatar)}" alt="">` : `<div class="avatar"></div>`;
-      return `<label class="list-row"><input class="row-check" type="checkbox" data-user-id="${escapeHtml(user.id)}" ${checked.has(user.id) ? "checked" : ""}><span>${avatar}</span><span class="user-main"><span class="user-name"><strong>${escapeHtml(user.name || user.handle)}</strong>${user.verified ? '<span class="badge">●</span>' : ''}</span><span class="handle">@${escapeHtml(user.handle)}</span><span class="bio">${escapeHtml(user.bio || "暂无简介")}</span><span class="metrics">粉丝 ${formatNumber(user.followers)} · 关注 ${formatNumber(user.following)} · 发帖 ${formatNumber(user.posts)}${user.location ? ` · ${escapeHtml(user.location)}` : ""}${user.mutual ? " · 互关" : ""}</span></span></label>`;
+      return `<label class="list-row"><input class="row-check" type="checkbox" aria-label="选择 @${escapeHtml(user.handle)}" data-user-id="${escapeHtml(user.id)}" ${checked.has(user.id) ? "checked" : ""}><span>${avatar}</span><span class="user-main"><span class="user-name"><strong>${escapeHtml(user.name || user.handle)}</strong>${user.verified ? '<span class="badge">●</span>' : ''}</span><span class="handle">@${escapeHtml(user.handle)}</span><span class="bio">${escapeHtml(user.bio || "暂无简介")}</span><span class="metrics">粉丝 ${formatMetric(user.followers)} · 关注 ${formatMetric(user.following)} · 发帖 ${formatMetric(user.posts)}${user.location ? ` · ${escapeHtml(user.location)}` : ""}${user.mutual ? " · 互关" : ""}</span></span></label>`;
     }).join("");
     const top = start * ROW_HEIGHT;
     const bottom = Math.max(0, (users.length - end) * ROW_HEIGHT);
@@ -522,13 +590,18 @@
   }
 
   function renderSelection() {
-    const visibleSelected = runtime.filteredUsers.filter((user) => state.selectedIds.includes(user.id)).length;
-    refs.selectionCount.textContent = `已选 ${formatNumber(state.selectedIds.length)} 人`;
-    refs.selectionScope.textContent = `当前结果 ${formatNumber(runtime.filteredUsers.length)} 人`;
-    refs.captureCount.textContent = `已捕获 ${formatNumber(state.users.length)} 人`;
+    const checked = selectedSet();
+    const visibleSelected = runtime.filteredUsers.filter((user) => checked.has(user.id)).length;
+    const sourceSelected = state.collections[state.activeSource].filter((id) => checked.has(id)).length;
+    refs.resultsTitle.textContent = `${SOURCE_LABELS[state.activeSource]}结果`;
+    refs.selectionCount.textContent = `本组已选 ${formatNumber(sourceSelected)} 人`;
+    refs.selectionScope.textContent = `当前结果 ${formatNumber(runtime.filteredUsers.length)} 人 · 全部已选 ${formatNumber(state.selectedIds.length)} 人`;
+    refs.captureCount.textContent = `共用缓存 ${formatNumber(state.users.length)} 人`;
     refs.clearCaptured.disabled = state.users.length === 0;
     refs.selectFiltered.disabled = false;
-    refs.clearSelection.disabled = state.selectedIds.length === 0;
+    refs.clearSelection.disabled = sourceSelected === 0;
+    refs.clearSource.disabled = !state.collections[state.activeSource].length || Boolean(runtime.accountImport?.running);
+    refs.clearSource.textContent = `清空${SOURCE_LABELS[state.activeSource]}`;
     refs.selectionCount.title = `当前筛选结果中已选 ${visibleSelected} 人`;
   }
 
@@ -536,18 +609,20 @@
     const ready = runtime.sessionReady;
     refs.sessionDot.classList.toggle("ready", ready);
     if (runtime.storageCorrupt) refs.pageStatus.textContent = "本地状态结构异常，当前仅可查看，已阻止写操作";
-    else if (!isFollowingPage()) refs.pageStatus.textContent = "请打开自己的 Following 页面，再滚动加载用户";
-    else if (ready && runtime.sessionFingerprint) refs.pageStatus.textContent = `已连接当前 X 会话 · ${state.users.length ? "继续滚动可捕获更多" : "等待用户数据"}`;
+    else if (ready && runtime.sessionFingerprint) refs.pageStatus.textContent = `已连接当前 X 会话 · ${isFollowingPage() ? "可滚动捕获账号或解析名单" : "可解析自定义名单"}`;
     else if (ready) refs.pageStatus.textContent = "已监听页面会话，但还未得到可用于校验的会话指纹";
-    else if (runtime.hookReady) refs.pageStatus.textContent = "已监听页面请求，等待 X 返回关注用户数据…";
+    else if (runtime.hookReady) refs.pageStatus.textContent = "已监听页面请求，请打开个人主页或 Following 页面连接会话…";
     else refs.pageStatus.textContent = "正在连接 X 页面…";
   }
 
   function renderJob() {
     const job = state.job;
+    refs.footerPause.hidden = !runtime.running;
+    refs.footerProgress.textContent = runtime.accountImport?.running ? "正在解析名单" : job ? `${jobStatusLabel(job.status)} · ${globalThis.XListJob.progress(job).done}/${job.queue.length}` : "预览并勾选后添加";
     refs.jobCard.hidden = !job;
     if (!job) {
-      refs.start.textContent = "导入到列表";
+      refs.start.textContent = `导入已选 ${state.selectedIds.length} 人`;
+      refs.start.disabled = Boolean(runtime.accountImport?.running);
       return;
     }
     recomputeJobStats(job);
@@ -564,8 +639,8 @@
     else if (batchCooldown) refs.cooldownText.textContent = "等待 X 会话连接后自动继续";
     else if (platformWaiting) refs.cooldownText.textContent = `约 ${formatDuration(job.cooldownUntil - Date.now())} 后可继续`;
     else refs.cooldownText.textContent = job.status === "completed" ? "队列已完成" : "";
-    refs.start.textContent = job.status === "completed" ? "新建导入任务" : (job.status === "running" ? "导入进行中" : (batchWaiting ? "取消等待，继续任务" : (platformWaiting ? "等待 X 冷却" : "继续上次导入")));
-    refs.start.disabled = runtime.running || platformWaiting;
+    refs.start.textContent = job.status === "completed" ? `导入已选 ${state.selectedIds.length} 人` : (job.status === "running" ? "导入进行中" : (batchWaiting ? "取消等待，继续任务" : (platformWaiting ? "等待 X 冷却" : "继续上次导入")));
+    refs.start.disabled = runtime.running || platformWaiting || Boolean(runtime.accountImport?.running);
     refs.resume.textContent = batchWaiting ? "取消等待" : "继续";
     refs.resume.disabled = runtime.running || job.status === "completed" || platformWaiting;
     refs.pause.disabled = !runtime.running && !["running", "cooldown"].includes(job.status);
@@ -591,6 +666,7 @@
   }
 
   function render() {
+    renderSources();
     renderFilters();
     renderPageStatus();
     renderList();
@@ -600,31 +676,74 @@
     renderHistory();
   }
 
-  function mergeUsers(incoming) {
-    const map = new Map(state.users.map((user) => [user.id, user]));
-    for (const raw of incoming || []) {
-      const user = normalizeUser(raw);
-      if (!user) continue;
-      map.set(user.id, { ...(map.get(user.id) || {}), ...user });
+  function activateSource(source) {
+    if (!globalThis.XListAccounts.SOURCES.includes(source)) return;
+    state.activeSource = source;
+    refs.accountResults.querySelector(".filters-panel").open = false;
+    refs.host.shadowRoot.querySelectorAll("details[data-source]").forEach((node) => { node.open = node.dataset.source === source; });
+    refs.listViewport.scrollTop = 0;
+    refs.panel.querySelector(".xcurator-body").scrollTop = 0;
+    persistSoon();
+    render();
+  }
+
+  function renderSources() {
+    const shadow = refs.host.shadowRoot;
+    const checked = selectedSet();
+    if (state.activeSource === "legacy" && !state.collections.legacy.length) {
+      state.activeSource = state.collections.following.length ? "following" : "custom";
+      shadow.querySelector(`[data-source="${state.activeSource}"]`).open = true;
     }
-    state.users = Array.from(map.values()).slice(0, MAX_USERS);
-    state.selectedIds = state.selectedIds.filter((id) => map.has(id));
+    shadow.querySelector('[data-source="legacy"]').hidden = !state.collections.legacy.length;
+    for (const source of globalThis.XListAccounts.SOURCES) {
+      const ids = state.collections[source];
+      const selected = ids.filter((id) => checked.has(id)).length;
+      shadow.querySelector(`[data-source-count="${source}"]`).textContent = `${ids.length} 人${selected ? ` · 已选 ${selected}` : ""}`;
+    }
+    const slot = shadow.querySelector(`[data-results-slot="${state.activeSource}"]`);
+    if (refs.accountResults.parentNode !== slot) slot.appendChild(refs.accountResults);
+  }
+
+  function resetFollowingCapture() {
+    runtime.captureGeneration += 1;
+    runtime.captureClearPending = true;
+    window.postMessage({ source: SOURCE, kind: "CLEAR_CAPTURED_USERS" }, "*");
+  }
+
+  function clearCurrentSource() {
+    if (runtime.storageCorrupt) return showToast("本地状态异常，已阻止修改名单");
+    if (runtime.accountImport?.running) return showToast("请先停止名单解析，再清空名单");
+    const source = state.activeSource;
+    if (!state.collections[source].length) return;
+    if (!window.confirm(`清空${SOURCE_LABELS[source]}？共用账号缓存仍会保留，不会修改 X 列表或当前任务。`)) return;
+    globalThis.XListAccounts.clearSource(state, source);
+    if (source === "following") resetFollowingCapture();
+    if (source === "custom") runtime.accountImport.reset();
+    persistNow();
+    render();
+    showToast("本组名单已清空，账号资料仍保留在共用缓存中");
+  }
+
+  function mergeUsers(incoming, source) {
+    if (runtime.storageCorrupt) return;
+    const { overflow } = globalThis.XListAccounts.merge(state, incoming, source);
+    if (overflow) showToast("共用缓存已达到 5,000 个账号，请清除不需要的缓存后重试");
     persistSoon();
     if (runtime.panelOpen) render();
   }
 
   function clearCapturedUsers() {
-    if (!state.users.length) return showToast("当前没有已捕获的账号");
-    if (!window.confirm("清除当前已捕获的账号数据和勾选状态？不会删除正在导入的任务、进度或历史记录。")) return;
-    state.users = [];
-    state.selectedIds = [];
+    if (runtime.storageCorrupt) return showToast("本地状态异常，已阻止修改缓存");
+    if (runtime.accountImport?.running) return showToast("请先停止名单解析，再清除账号");
+    if (!state.users.length) return showToast("当前没有账号缓存");
+    if (!window.confirm("清除所有来源的账号缓存、名单和勾选状态？X 列表成员、当前任务、历史记录和冷却时间不受影响。")) return;
+    globalThis.XListAccounts.clearAll(state);
+    runtime.accountImport.reset();
     runtime.filteredUsers = [];
-    runtime.captureGeneration += 1;
-    runtime.captureClearPending = true;
+    resetFollowingCapture();
     persistNow();
     render();
-    window.postMessage({ source: SOURCE, kind: "CLEAR_CAPTURED_USERS" }, "*");
-    showToast("已清除已捕获账号。刷新并继续滚动 Following 页面即可重新捕获。");
+    showToast("已清除全部账号缓存；任务、历史记录和冷却时间已保留");
   }
 
   function selectFiltered() {
@@ -636,7 +755,8 @@
   }
 
   function clearSelection() {
-    state.selectedIds = [];
+    const ids = new Set(state.collections[state.activeSource]);
+    state.selectedIds = state.selectedIds.filter((id) => !ids.has(id));
     persistSoon();
     render();
   }
@@ -771,13 +891,12 @@
   function loadState(saved) {
     if (!saved || typeof saved !== "object") return;
     const invalidJob = saved.job && (!Array.isArray(saved.job.queue) || !saved.job.listId);
-    if ((saved.schemaVersion && Number(saved.schemaVersion) > 1) || (saved.users != null && !Array.isArray(saved.users)) || (saved.history != null && !Array.isArray(saved.history)) || invalidJob) {
+    if ((saved.schemaVersion && Number(saved.schemaVersion) > 2) || (saved.users != null && !Array.isArray(saved.users)) || (saved.history != null && !Array.isArray(saved.history)) || (saved.collections != null && !globalThis.XListAccounts.validCollections(saved.collections)) || invalidJob) {
       runtime.storageCorrupt = true;
       return;
     }
-    state.schemaVersion = Number(saved.schemaVersion || 1);
-    state.users = Array.isArray(saved.users) ? saved.users.map(normalizeUser).filter(Boolean).slice(0, MAX_USERS) : [];
-    state.selectedIds = Array.isArray(saved.selectedIds) ? saved.selectedIds.map(String) : [];
+    Object.assign(state, globalThis.XListAccounts.hydrate(saved));
+    state.schemaVersion = 2;
     state.filters = normalizeFilters(saved.filters);
     state.filterDraft = normalizeFilters(saved.filterDraft || state.filters);
     state.listUrl = String(saved.listUrl || "");
@@ -785,6 +904,7 @@
     state.job = saved.job ? globalThis.XListJob.normalizeAfterRestart(saved.job) : null;
     state.history = Array.isArray(saved.history) ? saved.history.slice(0, 20) : [];
     state.sessionFingerprint = String(saved.sessionFingerprint || "");
+    state.lookupCooldownUntil = Number(saved.lookupCooldownUntil) || 0;
   }
 
   function addMemberViaPage(listId, userId) {
@@ -877,6 +997,7 @@
     if (runtime.running || !state.job) return;
     const job = state.job;
     if (!(await validateJobForResume(job))) return;
+    if (runtime.accountImport?.blocked) return showToast("名单解析中或账号查询冷却中，请稍后再开始导入任务");
     if (job.status === "completed") return;
     if (job.cooldownUntil && Date.now() < job.cooldownUntil) {
       job.status = "cooldown";
@@ -987,6 +1108,7 @@
   }
 
   async function startOrResume() {
+    if (runtime.accountImport?.blocked) return showToast("名单解析中或账号查询冷却中，请稍后再开始导入任务");
     if (runtime.running) return;
     if (runtime.storageCorrupt) return showToast("本地状态结构异常，已进入只读保护，请导出/清理后再开始");
     if (state.job && state.job.status !== "completed") return cancelBatchWaitAndResume();
@@ -1059,11 +1181,11 @@
       runtime.captureGeneration = Number(data.captureGeneration || runtime.captureGeneration);
       runtime.captureClearPending = false;
     }
-    if (data.kind === "X_USERS" || data.kind === "X_SNAPSHOT") {
+    if (["X_USERS", "X_SNAPSHOT", "X_PROFILE_USERS"].includes(data.kind)) {
       const generation = Number(data.captureGeneration || 0);
       if (!runtime.captureClearPending && generation >= runtime.captureGeneration) {
         runtime.captureGeneration = generation;
-        mergeUsers(data.users);
+        mergeUsers(data.users, data.kind === "X_PROFILE_USERS" ? undefined : "following");
       }
     }
     if (data.kind === "X_ADD_RESULT") {
@@ -1082,7 +1204,7 @@
     } catch (error) {
       showToast(`读取本地状态失败：${error?.message || "storage error"}`);
     }
-    render();
+    activateSource(state.activeSource);
     if (isBatchWaiting(state.job)) scheduleAutoResume(state.job);
     window.postMessage({ source: SOURCE, kind: "REQUEST_SNAPSHOT" }, "*");
   }

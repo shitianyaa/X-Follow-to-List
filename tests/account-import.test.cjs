@@ -6,6 +6,37 @@ const vm = require("node:vm");
 const { webcrypto } = require("node:crypto");
 
 const source = (name) => readFileSync(join(__dirname, "../extension-dist/src", name), "utf8");
+const imports = { URL };
+vm.runInNewContext(source("account-import.js"), imports);
+const parse = (text) => JSON.parse(JSON.stringify(imports.XListImport.parse(text)));
+
+test("parses comma, whitespace, Chinese punctuation and profile links with case-insensitive deduplication", () => {
+  assert.deepEqual(parse("@Alice, bob\nhttps://x.com/CAROL?s=21，https://twitter.com/alice; dave\tEve、frank；www.x.com/grace"), {
+    handles: ["Alice", "bob", "CAROL", "dave", "Eve", "frank", "grace"], invalid: [], duplicates: 1
+  });
+});
+
+test("reads the extension's exported CSV, including quotes, commas, BOM and multiline biographies", () => {
+  assert.deepEqual(parse('\uFEFFUSERID,handle,name,bio,location,followers,following,posts\r\n9007199254740993,alice,"Alice, A","Hello\n""world""",,1,2,3\r\n2,bob,Bob,,,0,0,0'), {
+    handles: ["alice", "bob"], invalid: [], duplicates: 0
+  });
+  assert.deepEqual(parse("profile_url\nhttps://x.com/alice\nhttps://twitter.com/bob/").handles, ["alice", "bob"]);
+  assert.deepEqual(parse("alice,username").handles, ["alice", "username"]);
+});
+
+test("rejects invalid usernames, non-profile URLs and unrelated hosts without fetching them", () => {
+  const values = ["https://evil.example/alice", "https://x.com.evil.example/bob", "https://x.com/alice/status/1", "https://x.com/home", "https://user:pass@x.com/alice", "@bad-name", "a".repeat(16), "<script>"];
+  assert.deepEqual(parse(values.join(",")), { handles: [], invalid: values, duplicates: 0 });
+  assert.deepEqual(parse(" , \n"), { handles: [], invalid: [], duplicates: 0 });
+  assert.throws(() => parse('"alice'), /引号/);
+});
+
+test("bounds input size and unique accounts", () => {
+  assert.throws(() => parse("x".repeat(1024 * 1024 + 1)), /过大/);
+  assert.equal(parse(Array.from({ length: 5000 }, (_, i) => `user${i}`).join(",")).handles.length, 5000);
+  assert.throws(() => parse(Array.from({ length: 5001 }, (_, i) => `user${i}`).join(",")), /5,000/);
+});
+
 function hookHarness() {
   const messages = [], calls = [], listeners = [];
   let respond = () => new Response(JSON.stringify({ data: {} }), { headers: { "content-type": "application/json" } });
@@ -299,6 +330,152 @@ test("a Following request started before clearing cannot repopulate the cleared 
   assert.equal(h.messages.some((message) => message.kind === "X_USERS"), false);
   h.send("REQUEST_SNAPSHOT");
   assert.equal(h.messages.filter((message) => message.kind === "X_SNAPSHOT").at(-1).users.length, 0);
+});
+
+function importHarness(initialUsers = []) {
+  const node = (name) => ({ dataset: { import: name }, value: "", textContent: "", handlers: {}, addEventListener(kind, fn) { this.handlers[kind] = fn; } });
+  const refs = Object.fromEntries(["parse", "file", "stop", "status", "errors", "input", "refresh"].map((name) => [name, node(name)]));
+  refs.refresh.checked = false;
+  const input = node("textarea"), users = [...initialUsers], calls = [], listeners = [], limits = [], toasts = [], lists = [], changes = [];
+  const root = { querySelector: () => input, querySelectorAll: () => Object.values(refs) };
+  let cooldown = 0, allowed = true;
+  let respond = ({ handle }) => ({ ok: true, user: { id: String(calls.length), handle } });
+  const context = vm.createContext({ URL, setTimeout, clearTimeout, addEventListener: (_, listener) => listeners.push(listener) });
+  const pageGlobal = vm.runInContext("globalThis", context);
+  context.postMessage = (request) => {
+    calls.push(request.handle);
+    Promise.resolve(respond(request)).then((reply) => listeners.forEach((listener) => listener({ source: pageGlobal, data: { source: "x-list-curator", kind: "X_LOOKUP_RESULT", requestId: request.requestId, ...reply } })));
+  };
+  vm.runInContext(source("account-import.js"), context);
+  const controller = context.XListImport.mount({
+    root, getUsers: () => users, canImport: () => allowed,
+    beginImport: (handles) => lists.push(Array.from(handles)), onStateChange: () => changes.push(true),
+    getSettings: () => ({ betweenMin: 0, betweenMax: 0, batchSize: 20, pauseMin: 0, pauseMax: 0 }),
+    getCooldown: () => cooldown,
+    onRateLimit: (result) => { limits.push(result); cooldown = Date.now() + 60000; },
+    mergeUsers: (incoming) => {
+      for (const user of incoming) {
+        const index = users.findIndex((entry) => entry.id === user.id);
+        if (index < 0) users.push(user);
+        else users[index] = { ...users[index], ...user };
+      }
+    }, showToast: (message) => toasts.push(message)
+  });
+  return {
+    refs, input, users, calls, limits, toasts, lists, changes, controller,
+    respond(fn) { respond = fn; }, allow(value) { allowed = value; },
+    run(text) { input.value = text; return refs.parse.handlers.click(); }
+  };
+}
+
+test("import preview skips already-collected accounts and retains both successes and failures", async () => {
+  const h = importHarness([{ id: "1", handle: "ALICE" }]);
+  h.respond(({ handle }) => handle === "missing" ? { ok: false, message: "Unavailable" } : { ok: true, user: { id: "2", handle } });
+  await h.run("alice,bob,BOB,bad-name,missing");
+  assert.deepEqual(h.calls, ["bob", "missing"]);
+  assert.equal(h.users.length, 2);
+  assert.deepEqual(h.lists, [["alice", "bob", "missing"]]);
+  assert.equal(h.changes.length, 1);
+  assert.match(h.refs.status.textContent, /新增 1.*已收录 1.*重复 1.*无效 1.*查询失败 1/);
+  assert.match(h.refs.errors.textContent, /bad-name/);
+  assert.match(h.refs.errors.textContent, /Unavailable/);
+  assert.equal(h.controller.running, false);
+  assert.equal(h.input.disabled, false);
+});
+
+test("cached-only imports still populate the current custom list without making requests", async () => {
+  const h = importHarness([{ id: "1", handle: "alice" }, { id: "2", handle: "bob" }]);
+  await h.run("ALICE,bob");
+  assert.deepEqual(h.calls, []);
+  assert.deepEqual(h.lists, [["ALICE", "bob"]]);
+  assert.equal(h.controller.running, false);
+  h.refs.refresh.checked = true;
+  h.controller.reset();
+  assert.equal(h.input.value, "");
+  assert.equal(h.refs.refresh.checked, false);
+});
+
+test("opt-in statistics refresh queries only incomplete cached accounts once and keeps the same IDs", async () => {
+  const h = importHarness([
+    { id: "1", handle: "alice", followers: null, following: 20, posts: null },
+    { id: "2", handle: "bob", followers: 0, following: 0, posts: 0 }
+  ]);
+  assert.equal(h.refs.refresh.checked, false);
+  h.refs.refresh.checked = true;
+  h.respond(({ handle }) => ({ ok: true, user: { id: "1", handle, followers: 42, following: 20, posts: null } }));
+  await h.run("ALICE,bob,alice");
+  assert.deepEqual(h.calls, ["ALICE"]);
+  assert.equal(h.users.length, 2);
+  assert.equal(h.users[0].followers, 42);
+  assert.equal(h.users[0].posts, null);
+  assert.match(h.refs.status.textContent, /新增 0.*已收录 2.*补查 1.*重复 1/);
+  assert.equal(h.refs.refresh.disabled, false);
+});
+
+test("statistics refresh works at cache capacity and still halts on rate limits", async () => {
+  const h = importHarness(Array.from({ length: 5000 }, (_, i) => ({ id: String(i), handle: `user${i}`, followers: null })));
+  h.refs.refresh.checked = true;
+  h.respond(() => ({ ok: false, halt: true, retryable: true, status: 429, message: "Rate limit" }));
+  await h.run("user1,user2");
+  assert.deepEqual(h.calls, ["user1"]);
+  assert.equal(h.users.length, 5000);
+  assert.equal(h.limits.length, 1);
+  await h.run("user1,user2");
+  assert.deepEqual(h.calls, ["user1"]);
+});
+
+test("lookup limits stop the queue, save a cooldown and block immediate retries", async () => {
+  const h = importHarness();
+  h.respond(() => ({ ok: false, halt: true, retryable: true, status: 429, message: "Rate limit" }));
+  await h.run("alice,bob");
+  assert.deepEqual(h.calls, ["alice"]);
+  assert.equal(h.limits.length, 1);
+  assert.equal(h.controller.blocked, true);
+  await h.run("bob");
+  assert.deepEqual(h.calls, ["alice"]);
+  assert.match(h.refs.status.textContent, /冷却中/);
+});
+
+test("stopping waits for the current request and a later run skips the saved success", async () => {
+  const h = importHarness();
+  let finish;
+  h.respond(() => new Promise((resolve) => { finish = resolve; }));
+  const parsing = h.run("alice,bob");
+  assert.equal(h.controller.running, true);
+  h.refs.stop.handlers.click();
+  finish({ ok: true, user: { id: "1", handle: "alice" } });
+  await parsing;
+  assert.deepEqual(h.calls, ["alice"]);
+  assert.equal(h.users.length, 1);
+  assert.match(h.refs.status.textContent, /解析已停止/);
+  h.respond(({ handle }) => ({ ok: true, user: { id: "2", handle } }));
+  await h.run("alice,bob");
+  assert.deepEqual(h.calls, ["alice", "bob"]);
+});
+
+test("blocks parsing during a task and prevents local account storage overflow", async () => {
+  const h = importHarness([{ id: "1", handle: "existing" }]);
+  h.allow(false);
+  await h.run("alice");
+  assert.equal(h.calls.length, 0);
+  assert.match(h.toasts[0], /暂停导入任务/);
+  h.allow(true);
+  await h.run(Array.from({ length: 5000 }, (_, i) => `user${i}`).join(","));
+  assert.equal(h.calls.length, 0);
+  assert.match(h.refs.status.textContent, /总数将超过/);
+});
+
+test("file imports run through the same parser and reject oversized files before reading", async () => {
+  const h = importHarness();
+  let read = false;
+  h.refs.input.files = [{ size: 1024 * 1024 + 1, text: async () => { read = true; return "alice"; } }];
+  await h.refs.input.handlers.change();
+  assert.equal(read, false);
+  assert.equal(h.calls.length, 0);
+  h.refs.input.files = [{ size: 20, text: async () => "handle\nalice\nbob" }];
+  await h.refs.input.handlers.change();
+  assert.deepEqual(h.calls, ["alice", "bob"]);
+  assert.equal(h.users.length, 2);
 });
 
 test("stale lookup routes and network failures halt safely", async () => {
