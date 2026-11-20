@@ -5,6 +5,7 @@
   const SOURCE = "x-list-curator";
   const GRAPHQL_RE = /\/i\/api\/graphql\//i;
   const FOLLOWING_RE = /following|friends|userfollow/i;
+  const METRICS = ["followers", "following", "posts"];
   const ADD_ENDPOINT = "https://x.com/i/api/graphql/EQ9KOQeashjfWnwFvcSSpg/ListAddMember";
   const session = {
     authorization: "",
@@ -15,7 +16,10 @@
     fingerprint: ""
   };
   const capturedUsers = new Map();
+  const profileUsers = new Map();
   let captureGeneration = 0;
+  let lookupTemplate = null;
+  let lookupRunning = false;
 
   function post(kind, detail) {
     window.postMessage({ source: SOURCE, ...(detail || {}), kind }, "*");
@@ -31,13 +35,26 @@
     } catch (_) {}
   }
 
-  function emitUsers(users, url, generation = captureGeneration) {
+  function mergeProfile(previous, user) {
+    const merged = { ...previous, ...user };
+    for (const key of METRICS) merged[key] = user[key] ?? previous?.[key] ?? null;
+    return merged;
+  }
+
+  function emitUsers(users, url, generation = captureGeneration, profile = false) {
     if (generation !== captureGeneration) return;
     for (const user of users || []) {
-      if (user?.id) capturedUsers.set(String(user.id), user);
+      // Profile responses may arrive before the content script finishes loading.
+      if (profile && user?.id) {
+        profileUsers.set(String(user.id), mergeProfile(profileUsers.get(String(user.id)), user));
+        if (profileUsers.size > 5000) profileUsers.delete(profileUsers.keys().next().value);
+      }
+      if (user?.id && (!profile || capturedUsers.has(String(user.id)))) {
+        capturedUsers.set(String(user.id), mergeProfile(capturedUsers.get(String(user.id)), user));
+      }
     }
     const compact = Array.from(capturedUsers.values()).slice(-5000);
-    post("X_USERS", { users, url, total: compact.length, captureGeneration });
+    post(profile ? "X_PROFILE_USERS" : "X_USERS", { users, url, total: compact.length, captureGeneration });
   }
 
   function headerEntries(headers) {
@@ -96,6 +113,22 @@
     return text(obj?.avatar?.image_url || obj?.profile_image_url_https || legacy?.profile_image_url_https);
   }
 
+  function getLocation(obj) {
+    for (const value of [obj?.location?.location, obj?.location, getLegacy(obj)?.location]) {
+      if (typeof value === "string") return value;
+    }
+    return "";
+  }
+
+  function getCount(...values) {
+    for (const value of values) {
+      if (value == null || !["number", "string"].includes(typeof value) || (typeof value === "string" && !value.trim())) continue;
+      const number = Number(value);
+      if (Number.isSafeInteger(number) && number >= 0) return number;
+    }
+    return null;
+  }
+
   function looksLikeUser(obj) {
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
     const id = getId(obj);
@@ -104,8 +137,7 @@
   }
 
   function extractUsers(payload) {
-    const found = [];
-    const seen = new Set();
+    const found = new Map();
     const walk = (node, depth) => {
       if (!node || depth > 18 || typeof node !== "object") return;
       if (Array.isArray(node)) {
@@ -114,35 +146,37 @@
       }
       if (looksLikeUser(node)) {
         const id = getId(node);
-        if (!seen.has(id)) {
-          seen.add(id);
-          const legacy = getLegacy(node);
-          found.push({
-            id,
-            handle: getHandle(node),
-            name: getName(node),
-            bio: text(node?.profile_bio?.description || legacy?.description || node?.description),
-            location: text(legacy?.location || node?.location),
-            avatar: getAvatar(node),
-            followers: Number(legacy?.followers_count ?? node?.public_metrics?.followers_count ?? 0) || 0,
-            following: Number(legacy?.friends_count ?? node?.public_metrics?.following_count ?? 0) || 0,
-            posts: Number(legacy?.statuses_count ?? node?.public_metrics?.tweet_count ?? 0) || 0,
-            verified: Boolean(node?.verification?.verified || legacy?.verified || legacy?.is_blue_verified),
-            protected: Boolean(legacy?.protected || node?.protected),
-            mutual: Boolean(
-              node?.relationship_perspectives?.followed_by ||
-              node?.relationship?.source?.followed_by ||
-              node?.relationship?.followed_by ||
-              legacy?.followed_by
-            ),
-            capturedAt: Date.now()
-          });
-        }
+        const legacy = getLegacy(node);
+        const user = {
+          id,
+          handle: getHandle(node),
+          name: getName(node),
+          bio: text(node?.profile_bio?.description || legacy?.description || node?.description),
+          location: getLocation(node),
+          avatar: getAvatar(node),
+          followers: getCount(node?.relationship_counts?.followers, legacy?.followers_count, node?.public_metrics?.followers_count),
+          following: getCount(node?.relationship_counts?.following, legacy?.friends_count, node?.public_metrics?.following_count),
+          posts: getCount(node?.tweet_counts?.tweets, legacy?.statuses_count, node?.public_metrics?.tweet_count),
+          statsVersion: 2,
+          verified: Boolean(node?.is_blue_verified || node?.verification?.verified || legacy?.verified || legacy?.is_blue_verified),
+          protected: Boolean(legacy?.protected || node?.protected),
+          mutual: Boolean(
+            node?.relationship_perspectives?.followed_by ||
+            node?.relationship?.source?.followed_by ||
+            node?.relationship?.followed_by ||
+            legacy?.followed_by
+          ),
+          capturedAt: Date.now()
+        };
+        const previous = found.get(id);
+        if (previous) {
+          for (const key of METRICS) if (previous[key] == null) previous[key] = user[key];
+        } else found.set(id, user);
       }
       for (const value of Object.values(node)) walk(value, depth + 1);
     };
     walk(payload, 0);
-    return found;
+    return Array.from(found.values());
   };
 
   function isRelevantUrl(url) {
@@ -152,17 +186,30 @@
     return GRAPHQL_RE.test(url || "") && FOLLOWING_RE.test(url || "");
   }
 
+  function rememberLookupRequest(value) {
+    try {
+      const url = new URL(value, location.origin);
+      if (url.origin !== location.origin || !/^\/i\/api\/graphql\/[\w-]+\/UserByScreenName$/.test(url.pathname)) return;
+      const variables = JSON.parse(url.searchParams.get("variables") || "null");
+      if (!variables || !/^[a-zA-Z0-9_]{1,15}$/.test(variables.screen_name || "")) return;
+      lookupTemplate = url.href;
+      post("X_LOOKUP_READY", { ready: true });
+      return true;
+    } catch (_) {}
+  }
+
   function wrapFetch() {
     const originalFetch = window.fetch;
     window.fetch = async function patchedFetch(input, init) {
       const url = typeof input === "string" ? input : input?.url || "";
       inspectRequest(input, init);
+      const requestGeneration = captureGeneration;
       const response = await originalFetch.apply(this, arguments);
-      if (isRelevantUrl(url)) {
-        const requestGeneration = captureGeneration;
+      const profile = Boolean(response.ok && rememberLookupRequest(url));
+      if (isRelevantUrl(url) || profile) {
         response.clone().json().then((payload) => {
           const users = extractUsers(payload);
-          if (users.length) emitUsers(users, url, requestGeneration);
+          if (users.length) emitUsers(users, url, requestGeneration, profile);
         }).catch(() => {});
       }
       return response;
@@ -186,22 +233,22 @@
     };
     XMLHttpRequest.prototype.send = function patchedSend() {
       const url = this.__xCuratorUrl || "";
-      if (isRelevantUrl(url)) {
-        const requestGeneration = captureGeneration;
-        this.addEventListener("load", () => {
-          try {
-            const users = extractUsers(JSON.parse(this.responseText));
-            if (users.length) emitUsers(users, url, requestGeneration);
-          } catch (_) {}
-        });
-      }
+      const requestGeneration = captureGeneration;
+      this.addEventListener("load", () => {
+        if (this.status < 200 || this.status >= 300) return;
+        const profile = Boolean(rememberLookupRequest(url));
+        if (!isRelevantUrl(url) && !profile) return;
+        try {
+          const users = extractUsers(JSON.parse(this.responseText));
+          if (users.length) emitUsers(users, url, requestGeneration, profile);
+        } catch (_) {}
+      });
       inspectRequest(null, { headers: { "x-csrf-token": document.cookie.match(/(?:^|;\s*)ct0=([^;]+)/)?.[1] || "" } });
       return send.apply(this, arguments);
     };
   }
 
-  async function addMember({ requestId, listId, userId }) {
-    const startedAt = Date.now();
+  function sessionHeaders() {
     const csrf = session.csrf || document.cookie.match(/(?:^|;\s*)ct0=([^;]+)/)?.[1] || "";
     const headers = {
       accept: "*/*",
@@ -212,6 +259,51 @@
     };
     if (session.authorization) headers.authorization = session.authorization;
     if (session.transaction) headers["x-client-transaction-id"] = session.transaction;
+    return headers;
+  }
+
+  async function lookupUser({ requestId, handle }) {
+    const reply = (result) => post("X_LOOKUP_RESULT", { requestId, ...result });
+    if (!/^[a-zA-Z0-9_]{1,15}$/.test(handle || "")) return reply({ ok: false, message: "用户名格式无效" });
+    if (!lookupTemplate) return reply({ ok: false, halt: true, message: "请先打开任意 X 个人主页，等待资料加载后再解析名单" });
+    if (!session.authorization || !session.csrf) return reply({ ok: false, halt: true, message: "尚未连接登录会话，请刷新 X 页面后打开个人主页" });
+    if (lookupRunning) return reply({ ok: false, halt: true, message: "已有账号查询正在进行，请稍后重试" });
+    lookupRunning = true;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    try {
+      const url = new URL(lookupTemplate);
+      const variables = JSON.parse(url.searchParams.get("variables"));
+      variables.screen_name = handle;
+      url.searchParams.set("variables", JSON.stringify(variables));
+      const response = await fetch(url.href, { credentials: "include", headers: sessionHeaders(), signal: controller.signal });
+      const parsed = await response.json().catch(() => null);
+      const errors = Array.isArray(parsed?.errors) ? parsed.errors : [];
+      const codes = errors.map((error) => Number(error?.code));
+      const status = codes.includes(88) ? 429 : codes.some((code) => [32, 89].includes(code)) ? 401 : codes.some((code) => [326, 353].includes(code)) ? 403 : response.status;
+      const retryable = [400, 401, 403, 429].includes(status) || status >= 500;
+      const retryHeader = response.headers.get("retry-after");
+      const retryAfterMs = retryHeader ? Math.max(0, /^\d+$/.test(retryHeader) ? Number(retryHeader) * 1000 : Date.parse(retryHeader) - Date.now()) || 0 : 0;
+      if (retryable) return reply({ ok: false, halt: true, retryable: true, status, retryAfterMs, message: errors[0]?.message || `X 暂停或拒绝了账号查询（HTTP ${status}），请等待冷却后重试` });
+      if (status === 404) {
+        lookupTemplate = null;
+        return reply({ ok: false, halt: true, status, message: "账号查询接口已失效，请刷新页面并重新打开个人主页" });
+      }
+      if (!response.ok || !parsed) return reply({ ok: false, halt: true, status, message: "X 返回了无法识别的账号查询响应，请刷新个人主页后重试" });
+      const user = extractUsers(parsed).find((entry) => entry.handle.toLowerCase() === handle.toLowerCase() && /^\d+$/.test(entry.id));
+      if (!user) return reply({ ok: false, status, message: errors[0]?.message || parsed?.data?.user?.result?.reason || "账号不存在、已停用或当前不可访问" });
+      reply({ ok: true, user, status });
+    } catch (error) {
+      reply({ ok: false, halt: true, retryable: true, status: 0, message: error?.name === "AbortError" ? "账号查询超时，请稍后重试" : "账号查询网络异常，请稍后重试" });
+    } finally {
+      clearTimeout(timer);
+      lookupRunning = false;
+    }
+  }
+
+  async function addMember({ requestId, listId, userId }) {
+    const startedAt = Date.now();
+    const headers = sessionHeaders();
     const body = {
       variables: { listId: String(listId), userId: String(userId) },
       features: {
@@ -269,12 +361,16 @@
   window.addEventListener("message", (event) => {
     if (event.source !== window || event.data?.source !== SOURCE) return;
     if (event.data.kind === "ADD_MEMBER") addMember(event.data);
+    if (event.data.kind === "LOOKUP_USER") lookupUser(event.data);
     if (event.data.kind === "REQUEST_SNAPSHOT") {
       post("X_SNAPSHOT", { users: Array.from(capturedUsers.values()).slice(-5000), captureGeneration });
+      post("X_PROFILE_USERS", { users: Array.from(profileUsers.values()), captureGeneration });
+      if (lookupTemplate) post("X_LOOKUP_READY", { ready: true });
       if (session.authorization || session.csrf) refreshSessionFingerprint();
     }
     if (event.data.kind === "CLEAR_CAPTURED_USERS") {
       capturedUsers.clear();
+      profileUsers.clear();
       captureGeneration += 1;
       post("X_CAPTURE_CLEARED", { captureGeneration });
       post("X_SNAPSHOT", { users: [], captureGeneration });
