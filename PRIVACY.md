@@ -1,27 +1,28 @@
 # Privacy Policy — X Follow to List
 
-Effective date: July 19, 2026  
-Extension version covered: 0.1.9
+Effective date: November 19, 2026
+Extension version covered: 0.2.0
 
 ## English
 
 ### 1. Scope
 
-X Follow to List is a browser extension that helps a user filter accounts loaded on their own X Following page and add accounts they explicitly select to an X List they specify. This policy describes the data handled by the extension.
+X Follow to List is a browser extension that helps a user import a custom account list or filter accounts loaded on their own X Following page, then add explicitly selected accounts to an X List they specify. This policy describes the data handled by the extension.
 
 ### 2. Data the extension accesses and processes
 
 The extension may process the following data only while providing its user-facing features:
 
-- Public X profile information returned on the user's Following page, including account ID, handle, display name, biography, location, profile image URL, follower/following/post counts, verification or protection status, and mutual-follow status.
-- User choices and local task data, including filters, selected account IDs, the target X List URL and ID, rate settings, queue status, retry results, task history, and exported snapshots or CSV files initiated by the user.
+- Account names and profile links pasted by the user or read from a user-selected TXT/CSV file. Files are read locally; only the requested account names are sent to X to look up profiles.
+- Public X profile information returned on the user's Following page or by requested account lookups, including account ID, handle, display name, biography, location, profile image URL, follower/following/post counts, verification or protection status, and mutual-follow status. Normal profile-page responses can also update accounts already in the local cache without sending additional requests or adding accounts to a source list. Users may opt into an additional lookup for cached accounts with missing statistics.
+- User choices and local task data, including account source memberships, filters, selected account IDs, the target X List URL and ID, rate settings, queue status, retry results, task history, and exported snapshots or CSV files initiated by the user.
 - X session information required to perform a user-confirmed List action. The extension temporarily accesses the authorization and CSRF/session values already present in the active X page. Raw authorization and CSRF values remain in page memory, are not written to extension storage or exports, and are not sent to the developer. A one-way session fingerprint may be stored locally to prevent a task from resuming under a different X session.
 
 ### 3. How the data is used
 
 The data is used only to:
 
-- display, filter, and select accounts the user follows;
+- resolve user-supplied account names and display, filter, and select collected accounts;
 - export data when the user clicks an export control;
 - add explicitly selected accounts to the X List supplied by the user;
 - pause, resume, validate, and report the progress of local tasks; and
@@ -33,16 +34,16 @@ The extension does not use this data for advertising, profiling, credit decision
 
 Account data, preferences, selections, session fingerprints, and task state are stored locally in the browser using IndexedDB or `chrome.storage.local`. The developer does not operate a server for this extension.
 
-Local data remains until the user clears captured data or task history, clears browser/extension storage, or uninstalls the extension. Files exported by the user remain wherever the user saves them and are controlled by the user.
+Profiles are shared between the custom and Following sections and do not expire automatically. Clearing one source list retains its profiles for later reuse; **清除缓存** removes all locally cached account profiles, source lists and selections while preserving active tasks, history and cooldown deadlines. Browser data controls can also remove local storage. Files exported by the user remain wherever the user saves them and are controlled by the user.
 
 ### 5. Sharing and transmission
 
-The developer does not receive, sell, rent, or share user data. The extension communicates with `x.com` or `twitter.com` only as necessary to read the active Following experience and submit List actions requested and confirmed by the user. No analytics, advertising SDK, telemetry service, or third-party data broker is included.
+The developer does not receive, sell, rent, or share user data. The extension communicates with `x.com` or `twitter.com` only as necessary to read the active Following experience, resolve account names supplied by the user, and submit List actions requested and confirmed by the user. No analytics, advertising SDK, telemetry service, or third-party data broker is included.
 
 ### 6. Permissions
 
 - `storage`: saves captured accounts, filters, selections, settings, and recoverable task state locally.
-- Access to `https://x.com/*` and `https://twitter.com/*`: runs the extension only on X/Twitter pages so it can read the user's Following results and submit user-confirmed List actions through the active X session.
+- Access to `https://x.com/*` and `https://twitter.com/*`: runs the extension only on X/Twitter pages so it can read the user's Following results, learn the current profile-lookup request, resolve user-supplied account names, and submit user-confirmed List actions through the active X session. The learned lookup request stays in page memory and is not stored or exported.
 
 ### 7. User controls
 
@@ -66,21 +67,22 @@ X Follow to List is an independent, unofficial tool. It is not affiliated with, 
 
 ### 1. 适用范围
 
-X Follow to List 是一个浏览器扩展，用于筛选用户自己的 X Following 页面中已加载的账号，并将用户明确选择的账号加入其指定的 X List。本政策说明扩展会处理哪些数据以及如何使用这些数据。
+X Follow to List 是一个浏览器扩展，用于导入自定义账号名单或筛选用户自己的 X Following 页面中已加载的账号，并将用户明确选择的账号加入其指定的 X List。本政策说明扩展会处理哪些数据以及如何使用这些数据。
 
 ### 2. 扩展访问和处理的数据
 
 扩展仅会为实现用户可见功能而处理以下数据：
 
-- X Following 页面返回的公开账号资料，包括账号 ID、用户名、显示名称、简介、位置、头像地址、粉丝数、关注数、发帖数、认证或保护状态以及互关状态。
-- 用户选择和本地任务数据，包括筛选条件、所选账号 ID、目标 X List 链接及 ID、节奏设置、队列状态、重试结果、任务历史，以及由用户主动导出的快照或 CSV 文件。
+- 用户粘贴或从主动选择的 TXT/CSV 文件中读取的用户名和个人主页链接。文件在本地读取，仅将需要查询的用户名发送给 X 以获取账号资料。
+- X Following 页面或用户主动请求的账号查询返回的公开资料，包括账号 ID、用户名、显示名称、简介、位置、头像地址、粉丝数、关注数、发帖数、认证或保护状态以及互关状态。正常浏览个人主页时，也会用网页现有响应更新已缓存账号，不额外请求、不将新账号加入来源名单；用户可以主动选择对统计缺失的缓存账号额外查询一次。
+- 用户选择和本地任务数据，包括账号来源归属、筛选条件、所选账号 ID、目标 X List 链接及 ID、节奏设置、队列状态、重试结果、任务历史，以及由用户主动导出的快照或 CSV 文件。
 - 执行用户确认的 List 操作所必需的 X 会话信息。扩展会临时访问当前 X 页面中已有的授权信息和 CSRF/会话值。原始授权值与 CSRF 值只存在于页面内存中，不会写入扩展存储或导出文件，也不会发送给开发者。扩展可能在本地保存不可逆的会话指纹，用于防止任务在不同 X 会话下错误续传。
 
 ### 3. 数据用途
 
 上述数据仅用于：
 
-- 显示、筛选和选择用户正在关注的账号；
+- 解析用户提供的用户名，并显示、筛选和选择已收录的账号；
 - 在用户主动点击导出时生成文件；
 - 将用户明确选择的账号加入用户提供的 X List；
 - 暂停、恢复、校验并显示本地任务进度；
@@ -92,16 +94,16 @@ X Follow to List 是一个浏览器扩展，用于筛选用户自己的 X Follow
 
 账号数据、偏好设置、选择状态、会话指纹和任务状态通过 IndexedDB 或 `chrome.storage.local` 保存在浏览器本地。开发者不为本扩展运营服务器。
 
-本地数据会保留到用户清除捕获数据或任务历史、清除浏览器/扩展存储，或者卸载扩展为止。用户主动导出的文件由用户自行选择保存位置并自行管理。
+自定义名单与关注列表共用账号资料，缓存不会自动过期。清空单个来源的名单会保留资料供后续复用；“清除缓存”会清除本地账号资料、来源名单和勾选，同时保留当前任务、历史记录与冷却截止时间。用户也可以通过浏览器的数据管理功能清除本地存储。用户主动导出的文件由用户自行选择保存位置并自行管理。
 
 ### 5. 数据共享与传输
 
-开发者不会接收、出售、出租或共享用户数据。扩展仅在读取当前 Following 内容以及执行用户明确请求并确认的 List 操作时与 `x.com` 或 `twitter.com` 通信。扩展不包含分析、广告、遥测或第三方数据代理服务。
+开发者不会接收、出售、出租或共享用户数据。扩展仅在读取当前 Following 内容、查询用户提供的账号，以及执行用户明确请求并确认的 List 操作时与 `x.com` 或 `twitter.com` 通信。扩展不包含分析、广告、遥测或第三方数据代理服务。
 
 ### 6. 权限用途
 
 - `storage`：在本地保存已捕获账号、筛选条件、选择状态、设置和可恢复任务。
-- `https://x.com/*` 与 `https://twitter.com/*`：仅在 X/Twitter 页面运行，以读取用户的 Following 结果，并通过当前 X 会话执行用户确认的 List 操作。
+- `https://x.com/*` 与 `https://twitter.com/*`：仅在 X/Twitter 页面运行，以读取用户的 Following 结果、从个人主页学习当前查询请求、解析用户提供的用户名，并通过当前 X 会话执行用户确认的 List 操作。查询请求模板仅保留在页面内存，不会保存或导出。
 
 ### 7. 用户控制
 
